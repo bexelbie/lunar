@@ -39,6 +39,17 @@ const requestBodySchema = z.object({
 // which is currently the recommended way to connect to the MCPX server
 // from clients that support STDIO transport only.
 export async function getServer(
+  // Allow sessionless createSession
+  server.setRequestHandler(
+    { method: "createSession" },
+    async (request, context) => {
+      // Implement production-level session creation logic here
+      // You may want to validate protocolVersion/clientInfo, etc.
+      // For now, just return a new sessionId
+      // ...existing session creation logic if any...
+      return { sessionId: `session-${Date.now()}` };
+    },
+  );
   services: Services,
   logger: Logger,
   shouldReturnEmptyServer: boolean,
