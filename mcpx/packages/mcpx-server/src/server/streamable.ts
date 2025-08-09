@@ -25,9 +25,11 @@ export function buildStreamableHttpRouter(
 
     let transport: StreamableHTTPServerTransport;
 
-    // Initial session creation
-    if (!sessionId && isInitializeRequest(req.body)) {
-      logger.info("Initializing new session transport");
+    // Initial session creation (more permissive)
+    logger.info("Incoming /mcp POST", { body: req.body });
+    logger.info("isInitializeRequest result", { result: isInitializeRequest(req.body) });
+    if (!sessionId && req.body && req.body.method === "initialize") {
+      logger.info("Initializing new session transport (permissive)");
       transport = await initializeSession(services, logger, metadata);
     } else if (sessionId) {
       const session = services.sessions.getSession(sessionId);
