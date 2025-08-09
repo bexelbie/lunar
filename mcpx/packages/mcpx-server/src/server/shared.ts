@@ -11,9 +11,6 @@ import { compact, compactRecord } from "@mcpx/toolkit-core/data";
 import { measureNonFailable } from "@mcpx/toolkit-core/time";
 import { Logger } from "winston";
 import z from "zod/v4";
-
-// This utility function is used to scope client names that should be ignored.
-// This is required since some clients (e.g. `mcp-remote`) might initiate
 // a "probe" connection to the server, to detect if it's up/requires auth.
 // Responsible clients might do this by a designated client name,
 // which we can detect and handle accordingly.
@@ -25,9 +22,6 @@ export function isClientNameToIgnore(clientName?: string): boolean {
   return clientNamesToIgnore.has(clientName);
 }
 const SERVICE_DELIMITER = "__";
-
-const requestBodySchema = z.object({
-  params: z.object({
     protocolVersion: z.string(),
     clientInfo: z.object({ name: z.string(), version: z.string() }),
   }),
@@ -39,149 +33,144 @@ const requestBodySchema = z.object({
 // which is currently the recommended way to connect to the MCPX server
 // from clients that support STDIO transport only.
 export async function getServer(
-  // Allow sessionless createSession
-  server.setRequestHandler(
-    { method: "createSession" },
-    async (request, context) => {
-      // Implement production-level session creation logic here
-      // You may want to validate protocolVersion/clientInfo, etc.
-      // For now, just return a new sessionId
-      // ...existing session creation logic if any...
-      return { sessionId: `session-${Date.now()}` };
-    },
-  );
   services: Services,
   logger: Logger,
-  shouldReturnEmptyServer: boolean,
+  shouldReturnEmptyServer: boolean
 ): Promise<Server> {
-  const server = new Server(
-    { name: "mcpx", version: "1.0.0" },
-    { capabilities: { tools: {} } },
-  );
-  if (shouldReturnEmptyServer) {
+    const server = new Server(
+      { name: "mcpx", version: "1.0.0" },
+      { capabilities: { tools: {} } },
+    );
+    if (shouldReturnEmptyServer) {
+      return server;
+    }
+
+    // ListToolsRequest handler
+    server.setRequestHandler(
+      ListToolsRequestSchema,
+      async (_request: any, { sessionId }: { sessionId: string }) => {
+        logger.debug("[DEBUG] ListToolsRequest received", { sessionId });
+        const consumerTag = sessionId
+          ? services.sessions.getSession(sessionId)?.metadata.consumerTag
+          : undefined;
+        const allTools = (
+          await Promise.all(
+            Array.from(services.targetClients.connectedClientsByService.entries())
+              .sort((a: [string, any], b: [string, any]) => a[0].localeCompare(b[0]))
+              .flatMap(([serviceName, client]: [string, any]) => {
+                return client.listTools().then(({ tools }: { tools: any[] }) =>
+                  compact(
+                    tools.map((tool: any) => {
+                      const hasPermission =
+                        services.permissionManager.hasPermission({
+                          serviceName,
+                          toolName: tool.name,
+                          consumerTag,
+                        });
+                      if (!hasPermission) {
+                        return null;
+                      }
+                      return {
+                        ...tool,
+                        name: `${serviceName}${SERVICE_DELIMITER}${tool.name}`,
+                      };
+                    })
+                  )
+                );
+              })
+          )
+        ).flat();
+        logger.debug("[DEBUG] ListToolsRequest response", { allTools });
+        return { tools: allTools };
+      }
+    );
+
+    // CallToolRequest handler
+    server.setRequestHandler(
+      CallToolRequestSchema,
+      async (request: any, { sessionId }: { sessionId: string }) => {
+        logger.info("[DEBUG] CallToolRequest received", {
+          method: request.method,
+          sessionId,
+        });
+        logger.debug("[DEBUG] CallToolRequest params", { request: request.params });
+        const consumerTag = sessionId
+          ? services.sessions.getSession(sessionId)?.metadata.consumerTag
+          : undefined;
+
+        const [serviceName, toolName] =
+          request?.params?.name?.split(SERVICE_DELIMITER) || [];
+        if (!serviceName) {
+          throw new Error("Invalid service name");
+        }
+        if (!toolName) {
+          throw new Error("Invalid tool name");
+        }
+        const hasPermission = services.permissionManager.hasPermission({
+          serviceName,
+          toolName,
+          consumerTag,
+        });
+        if (!hasPermission) {
+          throw new Error("Permission denied");
+        }
+
+        const client =
+          services.targetClients.connectedClientsByService.get(serviceName);
+        if (!client) {
+          logger.error("[DEBUG] Client not found for service", {
+            serviceName,
+            sessionId,
+          });
+          throw new Error(`Client not found for service: ${serviceName}`);
+        }
+
+        const measureToolCallResult = await measureNonFailable(async () => {
+          const result = await client.callTool({
+            name: toolName,
+            arguments: request.params.arguments,
+          });
+
+          services.systemStateTracker.recordToolCall({
+            targetServerName: serviceName,
+            toolName,
+            sessionId,
+          });
+          return result;
+        });
+
+        // Prepare metric labels and record the tool call duration
+        const sessionMeta = sessionId
+          ? services.sessions.getSession(sessionId)?.metadata
+          : undefined;
+
+        const isError =
+          !measureToolCallResult.success ||
+          Boolean(measureToolCallResult.result.isError);
+
+        const labels: Record<string, string | undefined> = {
+          "tool-name": toolName,
+          error: isError.toString(),
+          agent: consumerTag,
+          llm: sessionMeta?.llm?.provider,
+          model: sessionMeta?.llm?.modelId,
+        };
+
+        services.metricRecorder.recordToolCallDuration(
+          measureToolCallResult.duration,
+          compactRecord(labels),
+        );
+
+        if (measureToolCallResult.success) {
+          return measureToolCallResult.result;
+        }
+        return Promise.reject(measureToolCallResult.error);
+      }
+    );
+
     return server;
   }
-
-  server.setRequestHandler(
-    ListToolsRequestSchema,
-    async (_request, { sessionId }) => {
-      logger.info("ListToolsRequest received", { sessionId });
-      const consumerTag = sessionId
-        ? services.sessions.getSession(sessionId)?.metadata.consumerTag
-        : undefined;
-
-      const allTools = (
-        await Promise.all(
-          Array.from(services.targetClients.connectedClientsByService.entries())
-            .sort(([a], [b]) => a.localeCompare(b)) // Sort by service name to ensure consistent order
-            .flatMap(async ([serviceName, client]) => {
-              const { tools } = await client.listTools();
-              return compact(
-                tools.map((tool) => {
-                  const hasPermission =
-                    services.permissionManager.hasPermission({
-                      serviceName,
-                      toolName: tool.name,
-                      consumerTag,
-                    });
-                  if (!hasPermission) {
-                    return null;
-                  }
-                  return {
-                    ...tool,
-                    name: `${serviceName}${SERVICE_DELIMITER}${tool.name}`,
-                  };
-                }),
-              );
-            }),
-        )
-      ).flat();
-      logger.debug("ListToolsRequest response", { allTools });
-      return { tools: allTools };
-    },
-  );
-
-  server.setRequestHandler(
-    CallToolRequestSchema,
-    async (request, { sessionId }) => {
-      logger.info("CallToolRequest received", {
-        method: request.method,
-        sessionId,
-      });
-      logger.debug("CallToolRequest params", { request: request.params });
-      const consumerTag = sessionId
-        ? services.sessions.getSession(sessionId)?.metadata.consumerTag
-        : undefined;
-
-      const [serviceName, toolName] =
-        request?.params?.name?.split(SERVICE_DELIMITER) || [];
-      if (!serviceName) {
-        throw new Error("Invalid service name");
-      }
-      if (!toolName) {
-        throw new Error("Invalid tool name");
-      }
-      const hasPermission = services.permissionManager.hasPermission({
-        serviceName,
-        toolName,
-        consumerTag,
-      });
-      if (!hasPermission) {
-        throw new Error("Permission denied");
-      }
-
-      const client =
-        services.targetClients.connectedClientsByService.get(serviceName);
-      if (!client) {
-        logger.error("Client not found for service", {
-          serviceName,
-          sessionId,
-        });
-        throw new Error(`Client not found for service: ${serviceName}`);
-      }
-
-      const measureToolCallResult = await measureNonFailable(async () => {
-        const result = await client.callTool({
-          name: toolName,
-          arguments: request.params.arguments,
-        });
-
-        services.systemStateTracker.recordToolCall({
-          targetServerName: serviceName,
-          toolName,
-          sessionId,
-        });
-        return result;
-      });
-
-      // Prepare metric labels and record the tool call duration
-      const sessionMeta = sessionId
-        ? services.sessions.getSession(sessionId)?.metadata
-        : undefined;
-
-      const isError =
-        !measureToolCallResult.success ||
-        // Type inference for `.isError` fails, but it is indeed a boolean
-        Boolean(measureToolCallResult.result.isError);
-
-      const labels: Record<string, string | undefined> = {
-        "tool-name": toolName,
-        error: isError.toString(),
-        agent: consumerTag,
-        llm: sessionMeta?.llm?.provider,
-        model: sessionMeta?.llm?.modelId,
-      };
-
-      services.metricRecorder.recordToolCallDuration(
-        measureToolCallResult.duration,
-        compactRecord(labels),
-      );
-
-      if (measureToolCallResult.success) {
-        return measureToolCallResult.result;
-      }
-      return Promise.reject(measureToolCallResult.error);
-    },
+    }
   );
 
   return server;
