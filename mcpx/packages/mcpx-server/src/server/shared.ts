@@ -65,13 +65,44 @@ export async function getServer(
   server.setRequestHandler(
     ListToolsRequestSchema,
     async (_request, { sessionId }) => {
-      logger.info("ListToolsRequest received", { sessionId });
+  server.setRequestHandler(
+    ListToolsRequestSchema,
+    async (_request, { sessionId }: { sessionId: string }) => {
+      // Use logger and services from closure
       const consumerTag = sessionId
         ? services.sessions.getSession(sessionId)?.metadata.consumerTag
         : undefined;
 
       const allTools = (
         await Promise.all(
+          Array.from(services.targetClients.connectedClientsByService.entries())
+            .sort(([a], [b]) => a.localeCompare(b))
+            .flatMap(async ([serviceName, client]) => {
+              const { tools } = await client.listTools();
+              return compact(
+                tools.map((tool) => {
+                  const hasPermission =
+                    services.permissionManager.hasPermission({
+                      serviceName,
+                      toolName: tool.name,
+                      consumerTag,
+                    });
+                  if (!hasPermission) {
+                    return null;
+                  }
+                  return {
+                    ...tool,
+                    name: `${serviceName}${SERVICE_DELIMITER}${tool.name}`,
+                  };
+                }),
+              );
+            }),
+        )
+      ).flat();
+      logger.debug("ListToolsRequest response", { allTools });
+      return { tools: allTools };
+    },
+  );
           Array.from(services.targetClients.connectedClientsByService.entries())
             .sort(([a], [b]) => a.localeCompare(b)) // Sort by service name to ensure consistent order
             .flatMap(async ([serviceName, client]) => {
@@ -96,7 +127,7 @@ export async function getServer(
             }),
         )
       ).flat();
-      logger.debug("ListToolsRequest response", { allTools });
+  services.logger.debug("ListToolsRequest response", { allTools });
       return { tools: allTools };
     },
   );
@@ -181,7 +212,7 @@ export async function getServer(
         return measureToolCallResult.result;
       }
       return Promise.reject(measureToolCallResult.error);
-    },
+    }
   );
 
   return server;
