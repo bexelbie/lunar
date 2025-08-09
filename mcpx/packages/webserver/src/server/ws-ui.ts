@@ -17,17 +17,23 @@ export function bindUIWebsocket(
     `http://127.0.0.1:${env.UI_PORT}`,
     `http://localhost:${env.UI_PORT}`,
   ];
-  
   // Add PUBLIC_HOST origins for remote access if PUBLIC_HOST is set and not localhost
   if (env.PUBLIC_HOST && env.PUBLIC_HOST !== '127.0.0.1' && env.PUBLIC_HOST !== 'localhost') {
     allowedOrigins.push(`http://${env.PUBLIC_HOST}:${env.UI_PORT}`);
     allowedOrigins.push(`https://${env.PUBLIC_HOST}:${env.UI_PORT}`);
   }
+  logger.info("[CORS] Allowed origins for UI websocket:", allowedOrigins);
 
   const io = new WSServer(server, {
     path: "/ws-ui",
     cors: {
-      origin: allowedOrigins,
+      origin: (origin, callback) => {
+        const safeOrigin = origin ?? "";
+        logger.info(`[CORS] Incoming Origin: ${safeOrigin}`);
+        const isAllowed = allowedOrigins.includes(safeOrigin);
+        logger.info(`[CORS] Origin match: ${isAllowed}`);
+        callback(null, isAllowed);
+      },
       methods: ["GET", "POST"],
       credentials: true,
     },
@@ -36,6 +42,11 @@ export function bindUIWebsocket(
   io.on("connection", (socket) => {
     logger.debug("UI connected:", { id: socket.id });
     services.connections.uiSocket = socket;
+
+  // Log the handshake origin for each connection
+  const handshakeOrigin = socket.handshake.headers.origin ?? "";
+  logger.info(`[CORS] WebSocket handshake origin: ${handshakeOrigin}`);
+  logger.info(`[CORS] Is handshake origin allowed: ${allowedOrigins.includes(handshakeOrigin)}`);
 
     socket.on("disconnect", () => {
       services.connections.uiSocket = null;

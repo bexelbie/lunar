@@ -27,6 +27,9 @@ fi
 # Create a runtime configuration file that the UI can load
 cat > "$CONFIG_FILE" << EOF
 window.RUNTIME_CONFIG = {
+echo "[DEBUG] PUBLIC_HOST: $PUBLIC_HOST"
+echo "[DEBUG] PUBLIC_HOST_SUPPORT_TLS: $PUBLIC_HOST_SUPPORT_TLS"
+echo "[DEBUG] Generated runtime-config.js:"
   VITE_API_SERVER_URL: "${HTTP_SCHEME}://${PUBLIC_HOST}:${WEBSERVER_PORT}",
   VITE_WS_URL: "${WS_SCHEME}://${PUBLIC_HOST}:${WEBSERVER_PORT}"
 };
