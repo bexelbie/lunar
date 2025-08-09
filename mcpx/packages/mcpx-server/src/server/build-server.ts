@@ -20,6 +20,15 @@ export async function buildMcpxServer(
   const app = express();
   const server = createServer(app);
 
+  // Debug logging middleware for all requests
+  app.use((req, res, next) => {
+    logger.info(`[DEBUG] MCPX hit: ${req.method} ${req.path}`, {
+      headers: req.headers,
+      body: req.body,
+    });
+    next();
+  });
+
   app.use(accessLogFor(logger, [{ method: "GET", path: "/healthcheck" }]));
   app.use(express.json()); // Crucial - MCP routes expect JSON bodies!
 
